@@ -31,16 +31,12 @@ export default {async fetch(req,env){try{
  const url=new URL(req.url),path=url.pathname;
  if(path.startsWith('/api/')){
   if(path==='/api/_diag'&&req.method==='GET'){
-   const envKeys=Object.keys(env||{});
-   const probe=async()=>{try{await store().getMetadata('__probe__');return 'ok'}catch(e){return String(e&&e.message||e)}};
+   let blobsError='ok';
+   try{await store().getMetadata('__probe__')}catch(e){blobsError=String(e&&e.message||e)}
    return json({
-    envKeys,
     hasAdminPassword:Boolean(env&&env.ADMIN_PASSWORD),
-    hasBlobsContext:Boolean(globalThis.netlifyBlobsContext),
-    blobsContextEnv:typeof env?Object.keys(env).filter(k=>/BLOB|SITE|TOKEN|CONTEXT/i.test(k)):[],
-    blobsError:await probe(),
-    runtime:{hasProcess:typeof process!=='undefined',hasDeno:typeof Deno!=='undefined',hasNetlifyGlobal:typeof globalThis.Netlify!=='undefined'}
-
+    blobsError,
+    runtime:{hasNetlifyGlobal:typeof globalThis.Netlify!=='undefined',hasProcess:typeof process!=='undefined',hasDeno:typeof Deno!=='undefined'}
    });
   }
   if(path==='/api/login'&&req.method==='POST'){
