@@ -30,6 +30,19 @@ function validate(d){
 export default {async fetch(req,env){try{
  const url=new URL(req.url),path=url.pathname;
  if(path.startsWith('/api/')){
+  if(path==='/api/_diag'&&req.method==='GET'){
+   const envKeys=Object.keys(env||{});
+   const probe=async()=>{try{await store().getMetadata('__probe__');return 'ok'}catch(e){return String(e&&e.message||e)}};
+   return json({
+    envKeys,
+    hasAdminPassword:Boolean(env&&env.ADMIN_PASSWORD),
+    hasBlobsContext:Boolean(globalThis.netlifyBlobsContext),
+    blobsContextEnv:typeof env?Object.keys(env).filter(k=>/BLOB|SITE|TOKEN|CONTEXT/i.test(k)):[],
+    blobsError:await probe(),
+    runtime:{hasProcess:typeof process!=='undefined',hasDeno:typeof Deno!=='undefined',hasNetlifyGlobal:typeof globalThis.Netlify!=='undefined'}
+
+   });
+  }
   if(path==='/api/login'&&req.method==='POST'){
    if(!secret(env))return json({error:'网站未配置管理密码，后台暂不可用'},503);
    if(req.headers.get('Origin')!==url.origin)return json({error:'请从网站页面登录'},403);
@@ -66,4 +79,4 @@ export default {async fetch(req,env){try{
  if(path.startsWith('/seed/')){const value=SEED_ASSETS[path];if(!value)return new Response('Not found',{status:404});return new Response(req.method==='HEAD'?null:Uint8Array.from(atob(value),c=>c.charCodeAt(0)),{headers:{'Content-Type':'image/jpeg','Cache-Control':'public,max-age=86400'}})}
  const asset=STATIC[path];if(asset)return new Response(req.method==='HEAD'?null:asset.body,{headers:{'Content-Type':asset.type,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});
  return new Response('Not found',{status:404});
- }catch(e){console.error('Portfolio request failed',e);return json({error:'暂时无法完成操作，请稍后重试。当前修改仍保留在页面中。'},503)}}};
+ }catch(e){console.error('Portfolio request failed',e);return json({error:'暂时无法完成操作，请稍后重试。当前修改仍保留在页面中。',detail:String(e&&e.message||e)},503)}}};
