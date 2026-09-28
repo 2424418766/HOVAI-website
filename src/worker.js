@@ -1,6 +1,16 @@
-const OWNER='zhh757335402@gmail.com';
+import { getStore } from '@netlify/blobs';
+const PORTFOLIO_KEY='portfolio.json';
+const store=()=>getStore({name:'portfolio',consistency:'strong'});
+const parseRange=(header,size)=>{if(!header)return null;const m=/^bytes=(\d*)-(\d*)$/.exec(header.trim());if(!m)return null;const [,rawStart,rawEnd]=m;if(rawStart===''&&rawEnd==='')return null;let start,end;if(rawStart===''){const suffix=Number(rawEnd);if(!Number.isFinite(suffix))return null;start=Math.max(0,size-suffix);end=size-1}else{start=Number(rawStart);end=rawEnd===''?size-1:Number(rawEnd);if(!Number.isFinite(start)||!Number.isFinite(end))return null;if(start>=size||start>end)return false;end=Math.min(end,size-1)}return {start,end}};
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
-const owner=req=>Boolean(req.headers.get('oai-authenticated-user-id'))&&req.headers.get('oai-authenticated-user-email')?.toLowerCase()===OWNER;
+const TOKEN_TTL=86400000;
+const secret=env=>env.ADMIN_PASSWORD||'';
+const encoder=new TextEncoder();
+const digest=async value=>new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(value)));
+const sign=async(env,payload)=>{const key=await crypto.subtle.importKey('raw',encoder.encode(secret(env)),{name:'HMAC',hash:'SHA-256'},false,['sign']);const mac=await crypto.subtle.sign('HMAC',key,encoder.encode(payload));return btoa(String.fromCharCode(...new Uint8Array(mac))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
+const issueToken=async env=>{const payload=String(Date.now()+TOKEN_TTL);return payload+'.'+await sign(env,payload)};
+const verifyToken=async(env,token)=>{if(!secret(env)||typeof token!=='string')return false;const dot=token.lastIndexOf('.');if(dot<1)return false;const payload=token.slice(0,dot),mac=token.slice(dot+1);if(!/^\d+$/.test(payload)||Number(payload)<Date.now())return false;const expected=await sign(env,payload);if(mac.length!==expected.length)return false;let diff=0;for(let i=0;i<mac.length;i++)diff|=mac.charCodeAt(i)^expected.charCodeAt(i);return diff===0};
+const owner=async(req,env)=>{if(!secret(env))return false;const header=req.headers.get('Authorization')||'';return header.startsWith('Bearer ')?verifyToken(env,header.slice(7).trim()):false};
 // Add the commissioned catalog without replacing live uploads or later edits.
 function applyImports(raw){const d=structuredClone(raw);d.appliedImports=Array.isArray(d.appliedImports)?d.appliedImports:[];
  if(!d.appliedImports.includes(FASHION_IMPORT.id)){
@@ -20,14 +30,25 @@ function validate(d){
 export default {async fetch(req,env){try{
  const url=new URL(req.url),path=url.pathname;
  if(path.startsWith('/api/')){
-  if(!env.BUCKET)return json({error:'存储暂时无法连接，请稍后重试'},503);
-  if(req.method!=='GET'&&(!owner(req)||req.headers.get('Origin')!==url.origin))return json({error:'请使用网站所有者账号登录后编辑'},403);
-  if(path==='/api/portfolio'&&req.method==='GET'){const obj=await env.BUCKET.get('portfolio.json');return json({data:applyImports(obj?await obj.json():SEED_DATA),etag:obj?.etag||'seed',canEdit:owner(req)})}
+  if(path==='/api/login'&&req.method==='POST'){
+   if(!secret(env))return json({error:'网站未配置管理密码，后台暂不可用'},503);
+   if(req.headers.get('Origin')!==url.origin)return json({error:'请从网站页面登录'},403);
+   const body=await req.text();if(body.length>1000)return json({error:'请求过大'},413);
+   let password;try{password=JSON.parse(body).password}catch{return json({error:'请求格式不正确'},400)}
+   if(typeof password!=='string'||!password)return json({error:'请输入管理密码'},400);
+   const [given,want]=await Promise.all([digest(password),digest(secret(env))]);
+   let diff=0;for(let i=0;i<given.length;i++)diff|=given[i]^want[i];
+   if(diff!==0)return json({error:'密码不正确'},401);
+   return json({token:await issueToken(env),canEdit:true});
+  }
+  if(req.method!=='GET'&&(!(await owner(req,env))||req.headers.get('Origin')!==url.origin))return json({error:'请使用网站所有者账号登录后编辑'},403);
+  if(path==='/api/portfolio'&&req.method==='GET'){const obj=await store().getWithMetadata(PORTFOLIO_KEY,{type:'text'});const current=obj?JSON.parse(obj.data):null;return json({data:applyImports(current||SEED_DATA),etag:obj?.etag||'seed',canEdit:await owner(req,env)})}
   if(path==='/api/portfolio'&&req.method==='PUT'){
    const body=await req.text();if(body.length>1000000)return json({error:'内容过大'},413);let d;try{d=validate(JSON.parse(body))}catch(e){return json({error:e.message},400)}
    const expected=req.headers.get('If-Match');if(!expected)return json({error:'请重新加载网站后再保存'},428);
-   const result=await env.BUCKET.put('portfolio.json',JSON.stringify(d),{httpMetadata:{contentType:'application/json'},onlyIf:expected==='seed'?{etagDoesNotMatch:'*'}:{etagMatches:expected}});
-   if(!result)return json({error:'网站已在其他窗口更新。请保留当前修改，重新打开网站核对后保存。'},409);return json({etag:result.etag});
+   const storeRef=store(),existing=await storeRef.getWithMetadata(PORTFOLIO_KEY,{type:'text'});const currentEtag=existing?.etag||'seed';
+   if(currentEtag!==expected)return json({error:'网站已在其他窗口更新。请保留当前修改，重新打开网站核对后保存。'},409);
+   await storeRef.set(PORTFOLIO_KEY,JSON.stringify(d));const saved=await storeRef.getMetadata(PORTFOLIO_KEY);return json({etag:saved?.etag||currentEtag});
   }
   if(path==='/api/upload'&&req.method==='POST'){
    const mime=req.headers.get('Content-Type')||'',isVideo=['video/mp4','video/webm'].includes(mime),limit=isVideo?80*1024*1024:12582912;
@@ -37,11 +58,11 @@ export default {async fetch(req,env){try{
    const mp4=bytes.length>=12&&String.fromCharCode(...bytes.slice(4,8))==='ftyp';
    const webm=bytes.length>=4&&bytes[0]===26&&bytes[1]===69&&bytes[2]===223&&bytes[3]===163;
    if(!(mime==='video/mp4'?mp4:mime==='video/webm'?webm:jpeg))return json({error:'文件格式不正确 / Unsupported file'},400);
-   const ext=mime==='video/mp4'?'mp4':mime==='video/webm'?'webm':'jpg',id=crypto.randomUUID();await env.BUCKET.put('images/'+id+'.'+ext,bytes,{httpMetadata:{contentType:isVideo?mime:'image/jpeg'}});return json({src:'/media/'+id+'.'+ext});
+   const ext=mime==='video/mp4'?'mp4':mime==='video/webm'?'webm':'jpg',id=crypto.randomUUID();await store().set('images/'+id+'.'+ext,bytes,{metadata:{contentType:isVideo?mime:'image/jpeg'}});return json({src:'/media/'+id+'.'+ext});
   }return json({error:'找不到此操作'},404);
  }
  if(!['GET','HEAD'].includes(req.method))return new Response('Method not allowed',{status:405});
- if(/^\/media\/[a-f0-9-]{36}\.(jpg|mp4|webm)$/.test(path)){const key='images/'+path.split('/').pop();const obj=await env.BUCKET?.get(key,{range:req.headers});if(!obj)return new Response('Not found',{status:404});const mime=path.endsWith('.mp4')?'video/mp4':path.endsWith('.webm')?'video/webm':'image/jpeg';const headers={'Content-Type':mime,'Cache-Control':'public,max-age=31536000,immutable','X-Content-Type-Options':'nosniff','Accept-Ranges':'bytes'};let status=200;if(obj.range&&obj.range.length!==undefined){status=206;headers['Content-Range']=`bytes ${obj.range.offset}-${obj.range.offset+obj.range.length-1}/${obj.size}`;headers['Content-Length']=String(obj.range.length)}else if(obj.size!==undefined)headers['Content-Length']=String(obj.size);return new Response(req.method==='HEAD'?null:obj.body,{status,headers})}
+ if(/^\/media\/[a-f0-9-]{36}\.(jpg|mp4|webm)$/.test(path)){const key='images/'+path.split('/').pop();const stored=await store().getWithMetadata(key,{type:'arrayBuffer'});if(!stored)return new Response('Not found',{status:404});const bytes=new Uint8Array(stored.data),size=bytes.length,contentType=stored.metadata?.contentType||(path.endsWith('.mp4')?'video/mp4':path.endsWith('.webm')?'video/webm':'image/jpeg');const headers={'Content-Type':contentType,'Cache-Control':'public,max-age=31536000,immutable','X-Content-Type-Options':'nosniff','Accept-Ranges':'bytes'};const range=parseRange(req.headers.get('Range'),size);if(range===false)return new Response(null,{status:416,headers:{...headers,'Content-Range':'bytes */'+size}});let status=200,body=bytes;if(range){status=206;body=bytes.subarray(range.start,range.end+1);headers['Content-Range']='bytes '+range.start+'-'+range.end+'/'+size}headers['Content-Length']=String(body.length);return new Response(req.method==='HEAD'?null:body,{status,headers})}
  if(path.startsWith('/seed/')){const value=SEED_ASSETS[path];if(!value)return new Response('Not found',{status:404});return new Response(req.method==='HEAD'?null:Uint8Array.from(atob(value),c=>c.charCodeAt(0)),{headers:{'Content-Type':'image/jpeg','Cache-Control':'public,max-age=86400'}})}
  const asset=STATIC[path];if(asset)return new Response(req.method==='HEAD'?null:asset.body,{headers:{'Content-Type':asset.type,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});
  return new Response('Not found',{status:404});

@@ -1,1 +1,12 @@
-{"name":"huohai-portfolio","private":true,"type":"module","scripts":{"build":"node scripts/build.mjs","test":"node scripts/test.mjs"}}
+{
+  "name": "huohai-portfolio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --import ./scripts/helpers/blobs-hook-register.mjs scripts/test.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

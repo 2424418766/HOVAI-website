@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
 import worker from '../dist/server/index.js';
-const saved=new Map();let seq=0;const bucket={async get(k){let v=saved.get(k);return v?{etag:v.etag,body:v.body,json:async()=>JSON.parse(v.body)}:null},async put(k,body,opt={}){const old=saved.get(k);if(opt.onlyIf?.etagDoesNotMatch==='*'&&old)return null;if(opt.onlyIf?.etagMatches&&old?.etag!==opt.onlyIf.etagMatches)return null;let etag='rev'+(++seq);saved.set(k,{body,etag});return {etag}}};
-const origin='https://portfolio.test';const auth={'oai-authenticated-user-id':'owner','oai-authenticated-user-email':'zhh757335402@gmail.com',Origin:origin};
-const call=(path,options={})=>worker.fetch(new Request(origin+path,options),{BUCKET:bucket});
+import { storageSaved, getStore } from './helpers/blobs-stub.mjs';
+const saved=storageSaved;
+const store=getStore();
+const origin='https://portfolio.test',ADMIN_PASSWORD='test-password';
+const env={ADMIN_PASSWORD};
+const call=(path,options={})=>worker.fetch(new Request(origin+path,options),env);
+
+// Log in through the real endpoint and reuse the signed token for write requests.
+const login=await call('/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({password:ADMIN_PASSWORD})});
+assert.equal(login.status,200);const token=(await login.json()).token;
+const auth={Origin:origin,Authorization:'Bearer '+token};
+
+assert.equal((await call('/api/login',{method:'POST',headers:{Origin:origin},body:JSON.stringify({password:'wrong'})})).status,401);
+assert.equal((await call('/api/login',{method:'POST',headers:{Origin:'https://evil.test'},body:JSON.stringify({password:ADMIN_PASSWORD})})).status,403);
+assert.equal((await call('/api/login',{method:'POST',headers:{Origin:origin},body:'not json'})).status,400);
+assert.equal((await call('/api/portfolio',{headers:{Origin:origin,Authorization:'Bearer 12345.forged'}})).status===200,true);
+
 let r=await call('/api/portfolio');let initial=await r.json();assert.equal(initial.canEdit,false);assert.equal(initial.data.projects.length,15);
 assert.equal((await call('/api/portfolio',{method:'PUT',body:'{}'})).status,403);
 assert.equal((await call('/api/portfolio',{method:'PUT',headers:{...auth,Origin:'https://evil.test'},body:'{}'})).status,403);
+assert.equal((await call('/api/portfolio',{method:'PUT',headers:{Origin:origin},body:'{}'})).status,403);
 r=await call('/api/portfolio',{method:'PUT',headers:{...auth,'If-Match':'seed'},body:JSON.stringify(initial.data)});assert.equal(r.status,200);let rev=(await r.json()).etag;
 assert.equal((await call('/api/portfolio',{method:'PUT',headers:{...auth,'If-Match':'seed'},body:JSON.stringify(initial.data)})).status,409);
 initial.data.name='张活海';r=await call('/api/portfolio',{method:'PUT',headers:{...auth,'If-Match':rev},body:JSON.stringify(initial.data)});assert.equal(r.status,200);
@@ -32,7 +47,7 @@ console.log('Passed: persistent layout/independent covers and invalid-layout rej
 // Existing live portfolios are augmented, never replaced; saved removals stay removed.
 const catalog=JSON.parse((await import('node:fs')).readFileSync('src/video-defaults.json','utf8'));
 const originals=Object.keys(catalog).map((id,n)=>({id,src:`/media/${id}.mp4`,type:'video',name:`clip${n}.mp4`,alt:'',wide:true}));
-const base=JSON.parse((await import('node:fs')).readFileSync('src/seed.json','utf8'));base.projects.unshift({id:'live-films',title:'新项目',titleEn:'',year:'',section:'work',category:'motion',featured:false,cover:originals[0].id,images:originals});await bucket.put('portfolio.json',JSON.stringify(base));
+const base=JSON.parse((await import('node:fs')).readFileSync('src/seed.json','utf8'));base.projects.unshift({id:'live-films',title:'新项目',titleEn:'',year:'',section:'work',category:'motion',featured:false,cover:originals[0].id,images:originals});await store.set('portfolio.json',JSON.stringify(base));
 r=await call('/api/portfolio');const merged=await r.json();assert.equal(merged.data.projects.filter(p=>p.category==='fashion').length,7);assert.equal(merged.data.projects.filter(p=>p.category==='fashion').flatMap(p=>p.images).length,43);const films=merged.data.projects[0].images;assert.deepEqual(films.map(i=>i.src),originals.map(i=>i.src));assert.ok(films.every(i=>i.poster&&i.title));
 merged.data.projects=merged.data.projects.filter(p=>p.id!=='fashion-look-1');r=await call('/api/portfolio',{method:'PUT',headers:{...auth,'If-Match':merged.etag},body:JSON.stringify(merged.data)});assert.equal(r.status,200);r=await call('/api/portfolio');assert.equal((await r.json()).data.projects.filter(p=>p.category==='fashion').length,6);
 console.log('Passed: 7-project / 43-photo import, all 11 video sources preserved, cover enrichment, edits/removals retained');
