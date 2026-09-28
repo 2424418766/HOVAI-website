@@ -1,0 +1,12 @@
+﻿# Netlify deployment for HOVAI Photography.
+# The site is a single Edge Function (src/worker.js) that serves the static page
+# at "/" plus the portfolio API at /api/*, uploaded media at /media/* and the
+# bundled seed images at /seed/*.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[[edge_functions]]
+  path = "/*"
+  function = "portfolio"
